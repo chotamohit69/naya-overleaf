@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Naya Overleaf - Better LaTeX Editing</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="/images/favicon.svg">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">Naya Overleaf</div>
+      <div class="user-info">
+        <span id="user-name">User</span>
+        <a href="/auth/logout" class="btn btn-sm">Logout</a>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="main-content">
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <nav>
+          <ul class="nav-list">
+            <li class="nav-item"><a href="#" class="nav-link active" data-target="projects">Projects</a></li>
+            <li class="nav-item"><a href="#" class="nav-link" data-target="templates">Templates</a></li>
+            <li class="nav-item"><a href="#" class="nav-link" data-target="ai-keys">AI Keys</a></li>
+            <li class="nav-item"><a href="#" class="nav-link" data-target="settings">Settings</a></li>
+          </ul>
+        </nav>
+
+        <!-- Projects List -->
+        <div class="projects-header">
+          <h2 class="projects-title">My Projects</h2>
+          <button id="new-project-button" class="btn btn-sm">New Project</button>
+        </div>
+        <div id="projects-list" class="projects-list">
+          <!-- Projects will be loaded here -->
+        </div>
+        
+        <!-- Documents List (will be populated when a project is selected) -->
+        <div id="documents-list" class="documents-list" style="display: none;">
+          <!-- Documents will be loaded here -->
+        </div>
+      </div>
+
+      <!-- Editor Container -->
+      <div class="editor-container">
+        <!-- LaTeX Editor -->
+        <div id="latex-editor" class="latex-editor">
+          <div class="editor-placeholder">
+            <p>Select a project to start editing</p>
+          </div>
+        </div>
+
+        <!-- PDF Preview -->
+        <div id="pdf-preview" class="pdf-preview">
+          <div class="pdf-controls">
+            <button id="compile-button" class="btn btn-primary">Compile</button>
+          </div>
+          <div class="pdf-placeholder">
+            <p>Compile your document to see the preview</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Login Modal -->
+  <div id="login-modal" class="modal-overlay" style="display: none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title">Login to Naya Overleaf</h2>
+      </div>
+      <div class="modal-body">
+        <p>Please login to access your projects and start editing.</p>
+        <a href="/auth/login" class="btn btn-primary">Login with Keycloak</a>
+        <p class="dev-mode-notice" style="margin-top: 1rem; font-size: 0.85rem; color: #666;">
+          Running in development mode? You'll be auto-authenticated.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Project Modal -->
+  <div id="new-project-modal" class="modal-overlay" style="display: none;">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title">Create New Project</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="new-project-form">
+          <div class="form-group">
+            <label for="project-name" class="form-label">Project Name</label>
+            <input type="text" id="project-name" class="form-control" required placeholder="My LaTeX Project">
+          </div>
+          <div class="form-group">
+            <label for="project-description" class="form-label">Description (optional)</label>
+            <textarea id="project-description" class="form-control" placeholder="A brief description of your project"></textarea>
+          </div>
+          <div class="form-group">
+            <label for="project-template" class="form-label">Template</label>
+            <select id="project-template" class="form-control">
+              <option value="">Blank Project</option>
+              <option value="article">Article</option>
+              <option value="report">Report</option>
+              <option value="book">Book</option>
+              <option value="presentation">Presentation</option>
+            </select>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="cancel-project">Cancel</button>
+        <button class="btn btn-primary" id="create-project">Create Project</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/app.bundle.js"></script>
+</body>
+</html>

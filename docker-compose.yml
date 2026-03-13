@@ -1,0 +1,115 @@
+services:
+  mongo:
+    image: mongo:7
+    container_name: naya-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    container_name: naya-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: naya-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  app:
+    image: node:18-alpine
+    container_name: naya-app
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "npm run start"]
+    volumes:
+      - ./:/app
+    environment:
+      NODE_ENV: development
+      SKIP_KEYCLOAK: "true"
+      PORT: "3000"
+      MONGODB_URI: mongodb://mongo:27017
+      DB_NAME: naya_overleaf
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://rabbitmq
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/api/health/live', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));\""
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  worker:
+    image: node:18-alpine
+    container_name: naya-worker
+    restart: unless-stopped
+    working_dir: /app
+    command: ["sh", "-c", "npm run start-worker"]
+    volumes:
+      - ./:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+      - compilation_data:/app/compilation
+    environment:
+      NODE_ENV: development
+      SKIP_KEYCLOAK: "true"
+      MONGODB_URI: mongodb://mongo:27017
+      DB_NAME: naya_overleaf
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://rabbitmq
+      COMPILATION_DIR: /app/compilation
+      DOCKER_IMAGE: naya-overleaf-texlive
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mongo_data:
+  compilation_data:

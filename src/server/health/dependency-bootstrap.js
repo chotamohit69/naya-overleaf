@@ -2,6 +2,7 @@ const amqp = require('amqplib');
 const redis = require('redis');
 const dbConnection = require('../db/connection');
 const { updateSharedDependencyState } = require('./dependency-state');
+const { recordDependencyFailure } = require('../observability/metrics');
 
 let rabbitConnection;
 let redisClient;
@@ -26,6 +27,10 @@ const RABBITMQ_RECONNECT_DELAY_MS = Number.parseInt(
 );
 const RABBITMQ_CONNECT_TIMEOUT_MS = Number.parseInt(
   process.env.RABBITMQ_CONNECT_TIMEOUT_MS || '3000',
+  10
+);
+const REDIS_CONNECT_TIMEOUT_MS = Number.parseInt(
+  process.env.REDIS_CONNECT_TIMEOUT_MS || '3000',
   10
 );
 
@@ -55,6 +60,7 @@ const checkMongoHealth = async () => {
   } catch (error) {
     if (error && error.code === 'MONGO_PING_TIMEOUT') {
       updateSharedDependencyState('mongo', 'unhealthy');
+      recordDependencyFailure('mongo');
       return;
     }
 
@@ -63,6 +69,7 @@ const checkMongoHealth = async () => {
       updateSharedDependencyState('mongo', 'healthy');
     } catch (connectError) {
       updateSharedDependencyState('mongo', 'unhealthy');
+      recordDependencyFailure('mongo');
     }
   } finally {
     if (pingTimeout) {
@@ -133,6 +140,7 @@ const scheduleRabbitReconnect = (connectRabbitDependency) => {
       await connectRabbitDependency();
     } catch (error) {
       updateSharedDependencyState('rabbitmq', 'unhealthy');
+      recordDependencyFailure('rabbitmq');
       scheduleRabbitReconnect(connectRabbitDependency);
     }
   }, RABBITMQ_RECONNECT_DELAY_MS);
@@ -155,6 +163,14 @@ async function initializeDependencyReadiness() {
     } catch (error) {
       updateSharedDependencyState('mongo', 'unhealthy');
       startDependencyReadinessMonitoring();
+    }
+
+    if (process.env.PREVIEW_MODE === 'true') {
+      // The preview uses an in-process queue and no Redis. Report them as
+      // healthy so readiness reflects the preview's actual capabilities.
+      updateSharedDependencyState('rabbitmq', 'healthy');
+      updateSharedDependencyState('redis', 'healthy');
+      return;
     }
 
     const connectRabbitDependency = async () => {
@@ -188,21 +204,42 @@ async function initializeDependencyReadiness() {
       await connectRabbitDependency();
     } catch (error) {
       updateSharedDependencyState('rabbitmq', 'unhealthy');
+      recordDependencyFailure('rabbitmq');
       scheduleRabbitReconnect(connectRabbitDependency);
     }
+
+    let redisConnectTimeout;
 
     try {
       redisClient = redis.createClient({ url: REDIS_URL });
       redisClient.on('error', () => {
         updateSharedDependencyState('redis', 'unhealthy');
+        recordDependencyFailure('redis');
       });
       redisClient.on('ready', () => {
         updateSharedDependencyState('redis', 'healthy');
       });
-      await redisClient.connect();
+
+      // Redis is optional. Do not let a down or unreachable Redis instance
+      // prevent the process from becoming live, even though the driver keeps
+      // retrying in the background.
+      await Promise.race([
+        redisClient.connect(),
+        new Promise((_, reject) => {
+          redisConnectTimeout = setTimeout(
+            () => reject(new Error(`redis connect timed out after ${REDIS_CONNECT_TIMEOUT_MS}ms`)),
+            REDIS_CONNECT_TIMEOUT_MS
+          );
+        })
+      ]);
       updateSharedDependencyState('redis', 'healthy');
     } catch (error) {
       updateSharedDependencyState('redis', 'unhealthy');
+      recordDependencyFailure('redis');
+    } finally {
+      if (redisConnectTimeout) {
+        clearTimeout(redisConnectTimeout);
+      }
     }
   })().finally(() => {
     initializePromise = undefined;

@@ -3,7 +3,7 @@
  */
 
 import * as pdfjsLib from 'pdfjs-dist';
-import { PDFViewer } from 'pdfjs-dist/web/pdf_viewer';
+import { EventBus, PDFLinkService, PDFViewer } from 'pdfjs-dist/web/pdf_viewer';
 
 // Set the worker source path
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/js/pdf.worker.bundle.js';
@@ -23,21 +23,21 @@ class PdfPreview {
     
     this.pdfDoc = null;
     this.pdfViewer = null;
+    this.eventBus = null;
+    this.linkService = null;
     this.currentPage = 1;
     this.totalPages = 0;
     this.isLoading = false;
     this.lastJobId = null;
+    this.lastCompileLog = '';
     this.boundResizeHandler = this.handleResize.bind(this);
     
     this.init();
   }
   
   init() {
-    // Create viewer container
-    this.viewerContainer = document.createElement('div');
-    this.viewerContainer.className = 'pdf-viewer-container';
-    this.container.appendChild(this.viewerContainer);
-    
+    this.container.innerHTML = '';
+
     // Create loading indicator
     this.loadingIndicator = document.createElement('div');
     this.loadingIndicator.className = 'pdf-loading-indicator';
@@ -46,6 +46,18 @@ class PdfPreview {
     
     // Create toolbar
     this.createToolbar();
+
+    this.viewerRegion = document.createElement('div');
+    this.viewerRegion.className = 'pdf-viewer-region';
+    this.container.appendChild(this.viewerRegion);
+
+    this.viewerContainer = document.createElement('div');
+    this.viewerContainer.className = 'pdf-viewer-container';
+    this.viewerRegion.appendChild(this.viewerContainer);
+
+    this.viewerElement = document.createElement('div');
+    this.viewerElement.className = 'pdfViewer';
+    this.viewerContainer.appendChild(this.viewerElement);
     
     // Create error display
     this.errorDisplay = document.createElement('div');
@@ -67,6 +79,11 @@ class PdfPreview {
     this.toolbar = document.createElement('div');
     this.toolbar.className = 'pdf-toolbar';
     this.container.appendChild(this.toolbar);
+
+    const title = document.createElement('span');
+    title.className = 'pdf-toolbar-title';
+    title.textContent = 'PDF Preview';
+    this.toolbar.appendChild(title);
     
     // Create page navigation
     const prevButton = document.createElement('button');
@@ -122,14 +139,21 @@ class PdfPreview {
   }
   
   initPdfViewer() {
-    // Create PDF viewer options
+    this.eventBus = new EventBus();
+    this.linkService = new PDFLinkService({
+      eventBus: this.eventBus
+    });
+
     const viewerOptions = {
       container: this.viewerContainer,
-      scale: this.options.scale
+      viewer: this.viewerElement,
+      eventBus: this.eventBus,
+      linkService: this.linkService
     };
     
-    // Create PDF viewer
     this.pdfViewer = new PDFViewer(viewerOptions);
+    this.pdfViewer.currentScale = this.options.scale;
+    this.linkService.setViewer(this.pdfViewer);
   }
   
   async loadPdf(url) {
@@ -142,6 +166,7 @@ class PdfPreview {
       
       // Set the document in the viewer
       this.pdfViewer.setDocument(this.pdfDoc);
+      this.linkService.setDocument(this.pdfDoc);
       
       // Update total pages
       this.totalPages = this.pdfDoc.numPages;
@@ -192,7 +217,12 @@ class PdfPreview {
           const pdfUrl = `/api/documents/${job.documentId}/pdf?jobId=${jobId}`;
           return await this.loadPdf(pdfUrl);
         } else if (status === 'failed') {
-          this.showError('Compilation failed: ' + (job.error || 'Unknown error'));
+          const compileLog = job.logTail || job.stderr || job.stdout || '';
+          this.lastCompileLog = compileLog;
+          const detail = compileLog
+            ? `\n\n${compileLog}`
+            : '';
+          this.showError('Compilation failed: ' + (job.error || 'Unknown error') + detail);
           this.hideLoading();
           return false;
         } else {
@@ -273,16 +303,14 @@ class PdfPreview {
   }
   
   showError(message) {
-    this.errorDisplay.innerHTML = message;
+    this.errorDisplay.replaceChildren();
+    this.errorDisplay.textContent = message;
     this.errorDisplay.style.display = 'block';
-    
-    const existingBtn = this.errorDisplay.querySelector('.fix-with-ai-btn');
-    if (existingBtn) existingBtn.remove();
-    
-    if (this.lastJobId && window.AI_SERVICE_URL) {
+
+    if (this.lastJobId && window.AI_ENABLED !== false && window.AI_SERVICE_URL) {
       const fixBtn = document.createElement('button');
       fixBtn.className = 'fix-with-ai-btn';
-      fixBtn.innerHTML = '🤖 Fix with AI';
+      fixBtn.textContent = 'Fix with AI';
       fixBtn.addEventListener('click', () => {
         this.triggerAiFix();
       });
@@ -292,7 +320,7 @@ class PdfPreview {
   }
   
   async triggerAiFix() {
-    const errorMsg = this.errorDisplay.textContent;
+    const errorMsg = this.lastCompileLog || this.errorDisplay.textContent;
     const editor = this.options.getEditor?.();
     if (!this.lastJobId || !editor) return;
 
@@ -304,19 +332,17 @@ class PdfPreview {
     }
     
     try {
-      const userId = window.currentUserId || 'dev-user-123';
-      const aiServiceUrl = window.AI_SERVICE_URL || 'http://localhost:8000';
+      const aiServiceUrl = window.AI_SERVICE_URL || '/api/ai';
       
       const documentContent = editor.getContent();
-      const lines = documentContent.split('\n');
       const errorLineMatch = errorMsg.match(/line (\d+)/i);
-      const errorLine = errorLineMatch ? parseInt(errorLineMatch[1]) : null;
+      const errorLine = errorLineMatch ? parseInt(errorLineMatch[1], 10) : null;
       
-      const response = await fetch(`${aiServiceUrl}/ai/fix-error`, {
+      const response = await fetch(`${aiServiceUrl}/fix-error`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
-          user_id: userId,
           error_log: errorMsg,
           document_content: documentContent,
           error_line: errorLine
@@ -338,7 +364,7 @@ class PdfPreview {
     } finally {
       if (fixBtn) {
         fixBtn.disabled = false;
-        fixBtn.textContent = '🤖 Fix with AI';
+        fixBtn.textContent = 'Fix with AI';
       }
     }
   }
@@ -348,15 +374,26 @@ class PdfPreview {
     
     const preview = document.createElement('div');
     preview.className = 'ai-diff-preview';
-    preview.innerHTML = `
-      <strong>AI Suggestion:</strong>
-      <p>${result.explanation}</p>
-      <div>
-        <span class="old">${result.patch?.old || ''}</span>
-        <br>
-        <span class="new">${result.patch?.new || ''}</span>
-      </div>
-    `;
+    const title = document.createElement('strong');
+    title.textContent = 'AI Suggestion:';
+
+    const explanation = document.createElement('p');
+    explanation.textContent = result.explanation || '';
+
+    const diff = document.createElement('div');
+    const oldSpan = document.createElement('span');
+    oldSpan.className = 'old';
+    oldSpan.textContent = result.patch?.old || '';
+
+    const newSpan = document.createElement('span');
+    newSpan.className = 'new';
+    newSpan.textContent = result.patch?.new || '';
+
+    diff.appendChild(oldSpan);
+    diff.appendChild(document.createElement('br'));
+    diff.appendChild(newSpan);
+
+    preview.replaceChildren(title, explanation, diff);
     
     const actions = document.createElement('div');
     actions.className = 'ai-diff-actions';
@@ -392,18 +429,23 @@ class PdfPreview {
     const patch = result.patch;
     const lines = editor.getContent().split('\n');
 
-    
     if (patch.line >= 1 && patch.line <= lines.length) {
       const lineIndex = patch.line - 1;
-      
+
       if (patch.old && lines[lineIndex].includes(patch.old)) {
         lines[lineIndex] = lines[lineIndex].replace(patch.old, patch.new);
       } else if (patch.old === undefined || patch.old === '') {
         if (patch.new) {
-          lines[lineIndex] += patch.new;
+          // `line` is 1-based and names the line the fix belongs to. Appending
+          // avoids replacing the visible line with only the inserted fragment.
+          lines[lineIndex] = `${lines[lineIndex] || ''}${patch.new}`;
         }
       } else {
-        lines[lineIndex] = patch.new;
+        // The model could not match the source line. Only replace it when both
+        // sides are present, otherwise this would silently delete content.
+        if (patch.new) {
+          lines[lineIndex] = patch.new;
+        }
       }
       
       const newContent = lines.join('\n');

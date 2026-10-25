@@ -4,16 +4,25 @@
 
 const path = require('path');
 
+const modeArgumentIndex = process.argv.indexOf('--mode');
+const mode = modeArgumentIndex !== -1
+  ? process.argv[modeArgumentIndex + 1]
+  : (process.env.NODE_ENV === 'development' ? 'development' : 'production');
+
 module.exports = {
-  mode: process.env.NODE_ENV === 'production' ? 'production' : 'development',
+  mode,
   entry: {
     app: './src/client/index.js',
     'pdf.worker': 'pdfjs-dist/build/pdf.worker.entry'
   },
   output: {
     filename: 'js/[name].bundle.js',
+    chunkFilename: 'js/[name].bundle.js',
     path: path.resolve(__dirname, 'public'),
-    publicPath: '/'
+    publicPath: '/',
+    clean: {
+      keep: /^(index\.html|images\/)/
+    }
   },
   module: {
     rules: [
@@ -50,7 +59,7 @@ module.exports = {
   resolve: {
     extensions: ['.js', '.jsx']
   },
-  devtool: process.env.NODE_ENV === 'production' ? 'source-map' : 'eval-source-map',
+  devtool: mode === 'production' ? false : 'eval-source-map',
   devServer: {
     static: {
       directory: path.join(__dirname, 'public')

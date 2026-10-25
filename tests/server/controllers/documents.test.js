@@ -25,6 +25,7 @@ jest.mock('../../../src/server/db/connection', () => ({
 }));
 
 jest.mock('../../../src/server/realtime/sharedb-connection', () => ({
+  initializeShareDB: jest.fn().mockResolvedValue({}),
   get: jest.fn(() => ({
     create: jest.fn((data, cb) => cb(null)),
     subscribe: jest.fn((cb) => cb(null))
@@ -94,6 +95,23 @@ describe('Documents Controller', () => {
       await documentsController.createDocument(mockReq, mockRes);
       
       expect(mockRes.status).toHaveBeenCalledWith(400);
+    });
+
+    it('should reject document names with path traversal', async () => {
+      mockReq.body = {
+        name: '../evil.tex',
+        content: '\\documentclass{article}',
+        projectId: '507f1f77bcf86cd799439012'
+      };
+
+      await documentsController.createDocument(mockReq, mockRes);
+
+      expect(mockRes.status).toHaveBeenCalledWith(400);
+      expect(mockRes.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.stringMatching(/path|parent/i)
+        })
+      );
     });
   });
 });

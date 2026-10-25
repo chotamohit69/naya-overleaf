@@ -3,10 +3,12 @@
  */
 
 const ShareDB = require('sharedb');
+const Snapshot = require('sharedb/lib/snapshot');
 const WebSocket = require('ws');
 const WebSocketJSONStream = require('@teamwork/websocket-json-stream');
 const otText = require('ot-text');
 const { updateSharedDependencyState } = require('../health/dependency-state');
+const { installRealtimeAccessControl } = require('./auth');
 
 ShareDB.types.register(otText.type);
 
@@ -22,6 +24,21 @@ const createShareDbInitTimeoutError = (timeoutMs) => {
   error.code = 'SHAREDB_INIT_TIMEOUT';
   return error;
 };
+
+async function getCurrentSnapshotVersion(snapshots, ops, id) {
+  const doc = await snapshots.findOne({ _id: id }, { projection: { v: 1 } });
+  if (Number.isInteger(doc?.v)) {
+    return doc.v;
+  }
+
+  const latestOp = await ops
+    .find({ d: id }, { projection: { v: 1 } })
+    .sort({ v: -1 })
+    .limit(1)
+    .next();
+
+  return Number.isInteger(latestOp?.v) ? latestOp.v + 1 : 0;
+}
 
 async function waitForDbReady(dbModule, timeoutMs) {
   if (dbModule.db) {
@@ -64,65 +81,86 @@ async function initializeShareDB(options = {}) {
     }
 
     const shareDBDb = {
-      getCollection: (name) => {
-        return {
-          getSnapshot: async (id, version, options, callback) => {
-            try {
-              const collection = db.db.collection(`sharedb_${name}`);
-              const doc = await collection.findOne({ _id: id });
-              if (callback) callback(null, doc || null);
-              return doc;
-            } catch (err) {
-              if (callback) callback(err);
-              throw err;
-            }
-          },
-          writeSnapshot: async (id, version, snapshot, options, callback) => {
-            try {
-              const collection = db.db.collection(`sharedb_${name}`);
-              if (snapshot === null) {
-                await collection.deleteOne({ _id: id });
-              } else {
-                await collection.updateOne(
-                  { _id: id },
-                  { $set: { ...snapshot, _id: id } },
-                  { upsert: true }
-                );
-              }
-              if (callback) callback(null);
-            } catch (err) {
-              if (callback) callback(err);
-              throw err;
-            }
-          },
-          getOps: async (collection, id, from, to, options, callback) => {
-            try {
-              const opsCollection = db.db.collection(`sharedb_${name}_ops`);
-              const ops = await opsCollection
-                .find({ d: id, v: { $gte: from, $lt: to } })
-                .sort({ v: 1 })
-                .toArray();
-              if (callback) callback(null, ops);
-              return ops;
-            } catch (err) {
-              if (callback) callback(err);
-              throw err;
-            }
-          },
-          submit: async (id, op, options, callback) => {
-            try {
-              const opsCollection = db.db.collection(`sharedb_${name}_ops`);
-              await opsCollection.insertOne({ d: id, ...op });
-              if (callback) callback(null);
-            } catch (err) {
-              if (callback) callback(err);
-              throw err;
-            }
+      async commit(collection, id, op, snapshot, options, callback) {
+        try {
+          const snapshots = db.db.collection(`sharedb_${collection}`);
+          const ops = db.db.collection(`sharedb_${collection}_ops`);
+          const currentVersion = await getCurrentSnapshotVersion(snapshots, ops, id);
+
+          if (snapshot.v !== currentVersion + 1) {
+            callback(null, false);
+            return;
           }
-        };
+
+          await ops.updateOne(
+            { d: id, v: op.v },
+            { $set: { ...op, d: id } },
+            { upsert: true }
+          );
+
+          if (snapshot.type) {
+            await snapshots.updateOne(
+              { _id: id },
+              {
+                $set: {
+                  _id: id,
+                  v: snapshot.v,
+                  type: snapshot.type,
+                  data: snapshot.data,
+                  m: snapshot.m || null
+                }
+              },
+              { upsert: true }
+            );
+          } else {
+            await snapshots.deleteOne({ _id: id });
+          }
+
+          callback(null, true);
+        } catch (err) {
+          callback(err);
+        }
       },
-      commit: (cb) => cb && cb(),
-      close: (cb) => cb && cb()
+
+      async getSnapshot(collection, id, fields, options, callback) {
+        try {
+          const snapshots = db.db.collection(`sharedb_${collection}`);
+          const ops = db.db.collection(`sharedb_${collection}_ops`);
+          const doc = await snapshots.findOne({ _id: id });
+
+          if (doc) {
+            callback(null, new Snapshot(id, doc.v, doc.type, doc.data, doc.m || null));
+            return;
+          }
+
+          const version = await getCurrentSnapshotVersion(snapshots, ops, id);
+          callback(null, new Snapshot(id, version, null, undefined, null));
+        } catch (err) {
+          callback(err);
+        }
+      },
+
+      async getOps(collection, id, from, to, options, callback) {
+        try {
+          const query = { d: id, v: { $gte: from } };
+          if (to !== null && to !== undefined) {
+            query.v.$lt = to;
+          }
+
+          const ops = await db.db.collection(`sharedb_${collection}_ops`)
+            .find(query)
+            .sort({ v: 1 })
+            .toArray();
+
+          callback(null, ops.map(({ _id, d, ...op }) => op));
+        } catch (err) {
+          callback(err);
+        }
+      },
+
+      close(callback) {
+        if (callback) callback();
+      }
     };
 
     const newBackend = new ShareDB({
@@ -130,7 +168,15 @@ async function initializeShareDB(options = {}) {
       presence: true
     });
 
+    installRealtimeAccessControl(newBackend, db);
+
     const newConnection = newBackend.connect();
+    if (newConnection.agent) {
+      newConnection.agent.custom = {
+        ...(newConnection.agent.custom || {}),
+        serverSide: true
+      };
+    }
 
     backend = newBackend;
     connection = newConnection;
@@ -165,10 +211,10 @@ initializeShareDB().catch(err => {
 function setupWebSocketServer(server) {
   const wss = new WebSocket.Server({ server });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, request) => {
     const stream = new WebSocketJSONStream(ws);
 
-    getBackend().listen(stream);
+    getBackend().listen(stream, request);
 
     console.log('New ShareDB WebSocket connection');
 

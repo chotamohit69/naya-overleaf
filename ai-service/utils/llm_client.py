@@ -12,9 +12,14 @@ except ImportError:
     AsyncAnthropic = None
 
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
     genai = None
+
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 
 
 async def call_openai(api_key: str, system_prompt: str, user_prompt: str, 
@@ -23,10 +28,10 @@ async def call_openai(api_key: str, system_prompt: str, user_prompt: str,
     if AsyncOpenAI is None:
         raise Exception("OpenAI package not installed")
     
-    client = AsyncOpenAI(api_key=api_key)
+    client = AsyncOpenAI(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS)
     
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -44,10 +49,10 @@ async def call_anthropic(api_key: str, system_prompt: str, user_prompt: str,
     if AsyncAnthropic is None:
         raise Exception("Anthropic package not installed")
     
-    client = AsyncAnthropic(api_key=api_key)
+    client = AsyncAnthropic(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS)
     
     response = await client.messages.create(
-        model="claude-3-5-sonnet-20241022",
+        model=ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         temperature=temperature,
         system=system_prompt,
@@ -61,25 +66,22 @@ async def call_anthropic(api_key: str, system_prompt: str, user_prompt: str,
 
 async def call_gemini(api_key: str, system_prompt: str, user_prompt: str,
                       max_tokens: int = 500, temperature: float = 0.3) -> str:
-    """Call Google Gemini API."""
+    """Call Google Gemini API with a per-request client (no global key state)."""
     if genai is None:
-        raise Exception("Google Generative AI package not installed")
-    
-    genai.configure(api_key=api_key)
-    
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-pro",
-        system_instruction=system_prompt
-    )
-    
-    response = await model.generate_content_async(
-        user_prompt,
-        generation_config=genai.GenerationConfig(
+        raise Exception("Google Gen AI package not installed")
+
+    client = genai.Client(api_key=api_key)
+
+    response = await client.aio.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=user_prompt,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=system_prompt,
             max_output_tokens=max_tokens,
             temperature=temperature
         )
     )
-    
+
     return response.text
 
 

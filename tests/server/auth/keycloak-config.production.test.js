@@ -37,8 +37,19 @@ describe('keycloak-config production session secret hardening', () => {
     expect(() => requireConfigFresh()).toThrow(/SESSION_SECRET/);
   });
 
-  it('allows production startup when SESSION_SECRET is valid', () => {
+  it('rejects production startup when SESSION_SECRET is too short', () => {
     process.env.SESSION_SECRET = 'strong-session-secret-value';
+    expect(() => requireConfigFresh()).toThrow(/32 characters/);
+  });
+
+  it('rejects production startup when SKIP_KEYCLOAK is enabled', () => {
+    process.env.SESSION_SECRET = 'a'.repeat(48);
+    process.env.SKIP_KEYCLOAK = 'true';
+    expect(() => requireConfigFresh()).toThrow(/SKIP_KEYCLOAK/);
+  });
+
+  it('allows production startup when SESSION_SECRET is valid', () => {
+    process.env.SESSION_SECRET = 'a'.repeat(48);
     expect(() => requireConfigFresh()).not.toThrow();
   });
 });

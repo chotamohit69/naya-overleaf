@@ -8,8 +8,9 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { indentOnInput, syntaxHighlighting, defaultHighlightStyle, foldGutter, bracketMatching as cmBracketMatching } from '@codemirror/language';
 import { closeBrackets, autocompletion } from '@codemirror/autocomplete';
 import { Connection as ShareDBConnection } from 'sharedb/lib/client';
-import { diffMatchPatch } from 'diff-match-patch';
+import DiffMatchPatch from 'diff-match-patch';
 import { latex, latexHighlighting } from './latex-lang';
+import aiAutocomplete from './AiAutocomplete';
 
 class LatexEditor {
   constructor(container, documentId, options = {}) {
@@ -19,13 +20,14 @@ class LatexEditor {
       readOnly: false,
       lineNumbers: true,
       autoCloseBrackets: true,
-      trackChanges: false
+      trackChanges: false,
+      aiAutocomplete: true
     }, options);
     
     this.view = null;
     this.shareDbDoc = null;
     this.socket = null;
-    this.diffMatchPatch = new diffMatchPatch();
+    this.diffMatchPatch = new DiffMatchPatch();
     this.isRemoteChange = false;
     this.connected = false;
     this.ready = this.init();
@@ -98,7 +100,15 @@ class LatexEditor {
     if (this.options.trackChanges) {
       extensions.push(this.createTrackChangesExtension());
     }
-    
+
+    if (
+      this.options.aiAutocomplete !== false
+      && typeof window !== 'undefined'
+      && window.AI_ENABLED !== false
+    ) {
+      extensions.push(aiAutocomplete());
+    }
+
     extensions.push(this.createSyncExtension());
     
     return extensions;
@@ -253,11 +263,15 @@ class LatexEditor {
   
   // Get the current content
   getContent() {
-    return this.view.state.doc.toString();
+    return this.view ? this.view.state.doc.toString() : '';
   }
   
   // Set the content
   setContent(content) {
+    if (!this.view) {
+      return;
+    }
+
     this.view.dispatch({
       changes: {
         from: 0,

@@ -41,31 +41,54 @@ services:
       retries: 10
       start_period: 20s
 
+  texlive:
+    build:
+      context: ./docker/texlive
+      dockerfile: Dockerfile
+    image: naya-overleaf-texlive
+    container_name: naya-texlive-build
+    command: ["/bin/true"]
+    restart: "no"
+
   app:
-    image: node:18-alpine
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    image: naya-overleaf-node:dev
     container_name: naya-app
     restart: unless-stopped
     working_dir: /app
     command: ["sh", "-c", "npm run start"]
     volumes:
-      - ./:/app
+      - compilation_data:/app/compilation
     environment:
-      NODE_ENV: development
-      SKIP_KEYCLOAK: "true"
+      NODE_ENV: ${NODE_ENV:-development}
+      SKIP_KEYCLOAK: ${SKIP_KEYCLOAK:-true}
       PORT: "3000"
       MONGODB_URI: mongodb://mongo:27017
       DB_NAME: naya_overleaf
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://rabbitmq
+      COMPILATION_DIR: /app/compilation
+      COMPILATION_TIMEOUT_MS: ${COMPILATION_TIMEOUT_MS:-120000}
+      SESSION_SECRET: ${SESSION_SECRET:-naya-overleaf-dev-secret}
+      KEYCLOAK_URL: ${KEYCLOAK_URL:-http://host.docker.internal:8080/auth}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-naya-overleaf}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-naya-overleaf-client}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      AI_SERVICE_URL: http://ai-service:8000
+      AI_INTERNAL_SECRET: ${AI_INTERNAL_SECRET:?Set AI_INTERNAL_SECRET in .env}
+      AI_KEY_ENCRYPTION_SECRET: ${AI_KEY_ENCRYPTION_SECRET:?Set AI_KEY_ENCRYPTION_SECRET in .env (openssl rand -hex 32)}
     depends_on:
       mongo:
         condition: service_healthy
       redis:
-        condition: service_healthy
+        condition: service_started
       rabbitmq:
-        condition: service_healthy
+        condition: service_started
     ports:
-      - "3000:3000"
+      - "${APP_HOST_PORT:-3000}:3000"
     healthcheck:
       test:
         [
@@ -78,36 +101,68 @@ services:
       start_period: 30s
 
   worker:
-    image: node:18-alpine
+    build:
+      context: .
+      dockerfile: docker/node/Dockerfile
+    image: naya-overleaf-node:dev
     container_name: naya-worker
     restart: unless-stopped
     working_dir: /app
     command: ["sh", "-c", "npm run start-worker"]
     volumes:
-      - ./:/app
       - /var/run/docker.sock:/var/run/docker.sock
       - compilation_data:/app/compilation
     environment:
-      NODE_ENV: development
-      SKIP_KEYCLOAK: "true"
+      NODE_ENV: ${NODE_ENV:-development}
+      SKIP_KEYCLOAK: ${SKIP_KEYCLOAK:-true}
       MONGODB_URI: mongodb://mongo:27017
       DB_NAME: naya_overleaf
       REDIS_URL: redis://redis:6379
       RABBITMQ_URL: amqp://rabbitmq
       COMPILATION_DIR: /app/compilation
+      COMPILATION_TIMEOUT_MS: ${COMPILATION_TIMEOUT_MS:-120000}
+      DOCKER_COMMAND_TIMEOUT_MS: ${DOCKER_COMMAND_TIMEOUT_MS:-30000}
       DOCKER_IMAGE: naya-overleaf-texlive
+      WORKER_HEALTH_PORT: "3001"
     depends_on:
       mongo:
         condition: service_healthy
       redis:
-        condition: service_healthy
+        condition: service_started
       rabbitmq:
         condition: service_healthy
+      texlive:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3001/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1));\""
+        ]
       interval: 20s
       timeout: 5s
       retries: 5
+      start_period: 20s
+
+  ai-service:
+    build:
+      context: ./ai-service
+    container_name: naya-ai-service
+    restart: unless-stopped
+    environment:
+      AI_INTERNAL_SECRET: ${AI_INTERNAL_SECRET:?Set AI_INTERNAL_SECRET in .env}
+      APP_INTERNAL_URL: http://app:3000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      app:
+        condition: service_healthy
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
       start_period: 20s
 
 volumes:

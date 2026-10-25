@@ -8,15 +8,21 @@ const ShareDB = require('sharedb');
 const shareConn = require('../../realtime/sharedb-connection');
 const fs = require('fs');
 const path = require('path');
+const { validateDocumentName, resolveInsideDirectory } = require('../../utils/documentNames');
+const { getUserIdFromRequest } = require('../../realtime/auth');
 
 const COMPILATION_DIR = process.env.COMPILATION_DIR || path.join(__dirname, '../../../../compilation');
 
 // Get a single document by ID
 const getDocument = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const documentId = req.params.id;
     const db = client.db;
+
+    if (!ObjectId.isValid(documentId)) {
+      return res.status(400).json({ error: 'Invalid document ID' });
+    }
     
     const document = await db.collection('documents').findOne({
       _id: new ObjectId(documentId),
@@ -51,12 +57,25 @@ const getDocument = async (req, res) => {
 // Create a new document in a project
 const createDocument = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const { name, content, projectId } = req.body;
     const db = client.db;
     
     if (!name || !projectId) {
       return res.status(400).json({ error: 'Document name and project ID are required' });
+    }
+
+    if (!ObjectId.isValid(projectId)) {
+      return res.status(400).json({ error: 'Invalid project ID' });
+    }
+
+    if (content !== undefined && typeof content !== 'string') {
+      return res.status(400).json({ error: 'Document content must be a string' });
+    }
+
+    const documentNameValidation = validateDocumentName(name);
+    if (!documentNameValidation.valid) {
+      return res.status(400).json({ error: documentNameValidation.error });
     }
     
     // Check if user has access to the project
@@ -74,7 +93,7 @@ const createDocument = async (req, res) => {
     }
     
     const newDocument = {
-      name,
+      name: documentNameValidation.name,
       content: content || '',
       projectId,
       createdAt: new Date(),
@@ -85,6 +104,7 @@ const createDocument = async (req, res) => {
     const result = await db.collection('documents').insertOne(newDocument);
     
     // Create ShareDB document for real-time collaboration
+    await shareConn.initializeShareDB();
     const shareDoc = shareConn.get('documents', result.insertedId.toString());
     shareDoc.create({ content: content || '' }, (err) => {
       if (err) console.error('Error creating ShareDB document:', err);
@@ -103,10 +123,14 @@ const createDocument = async (req, res) => {
 // Update a document
 const updateDocument = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const documentId = req.params.id;
     const { name } = req.body; // Only update metadata, not content (handled by ShareDB)
     const db = client.db;
+
+    if (!ObjectId.isValid(documentId)) {
+      return res.status(400).json({ error: 'Invalid document ID' });
+    }
     
     const document = await db.collection('documents').findOne({
       _id: new ObjectId(documentId),
@@ -135,7 +159,13 @@ const updateDocument = async (req, res) => {
       updatedAt: new Date()
     };
     
-    if (name) updateData.name = name;
+    if (name) {
+      const documentNameValidation = validateDocumentName(name);
+      if (!documentNameValidation.valid) {
+        return res.status(400).json({ error: documentNameValidation.error });
+      }
+      updateData.name = documentNameValidation.name;
+    }
     
     await db.collection('documents').updateOne(
       { _id: new ObjectId(documentId) },
@@ -156,9 +186,13 @@ const updateDocument = async (req, res) => {
 // Delete a document (soft delete)
 const deleteDocument = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const documentId = req.params.id;
     const db = client.db;
+
+    if (!ObjectId.isValid(documentId)) {
+      return res.status(400).json({ error: 'Invalid document ID' });
+    }
     
     const document = await db.collection('documents').findOne({
       _id: new ObjectId(documentId),
@@ -213,10 +247,18 @@ module.exports = {
 
 async function getDocumentPdf(req, res) {
   try {
-    const userId = req.kauth?.grant?.access_token?.content?.sub || req.user?.id;
+    const userId = getUserIdFromRequest(req);
     const documentId = req.params.id;
     const jobId = req.query.jobId;
     const db = client.db;
+
+    if (!ObjectId.isValid(documentId)) {
+      return res.status(400).json({ error: 'Invalid document ID' });
+    }
+
+    if (jobId && !ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Invalid compilation job ID' });
+    }
     
     const document = await db.collection('documents').findOne({
       _id: new ObjectId(documentId),
@@ -243,7 +285,9 @@ async function getDocumentPdf(req, res) {
     let job;
     if (jobId) {
       job = await db.collection('compilation_jobs').findOne({
-        _id: new ObjectId(jobId)
+        _id: new ObjectId(jobId),
+        documentId,
+        projectId: document.projectId
       });
     } else {
       job = await db.collection('compilation_jobs')
@@ -258,10 +302,10 @@ async function getDocumentPdf(req, res) {
       return res.status(404).json({ error: 'No compiled PDF found for this document' });
     }
     
-    const pdfPath = path.join(COMPILATION_DIR, job.pdfPath);
+    const pdfPath = resolveInsideDirectory(COMPILATION_DIR, job.pdfPath);
     
     if (!fs.existsSync(pdfPath)) {
-      const altPdfPath = path.join(COMPILATION_DIR, `${job._id}.pdf`);
+      const altPdfPath = resolveInsideDirectory(COMPILATION_DIR, `${job._id}.pdf`);
       if (fs.existsSync(altPdfPath)) {
         return res.sendFile(altPdfPath);
       }
@@ -280,13 +324,21 @@ async function getDocumentPdf(req, res) {
 
 async function downloadPdf(req, res) {
   try {
-    const userId = req.kauth?.grant?.access_token?.content?.sub || req.user?.id;
+    const userId = getUserIdFromRequest(req);
     const jobId = req.query.jobId;
     const documentId = req.query.documentId;
     const db = client.db;
     
     if (!jobId && !documentId) {
       return res.status(400).json({ error: 'Job ID or Document ID is required' });
+    }
+
+    if (jobId && !ObjectId.isValid(jobId)) {
+      return res.status(400).json({ error: 'Invalid compilation job ID' });
+    }
+
+    if (documentId && !ObjectId.isValid(documentId)) {
+      return res.status(400).json({ error: 'Invalid document ID' });
     }
     
     let job;
@@ -306,6 +358,10 @@ async function downloadPdf(req, res) {
     if (!job) {
       return res.status(404).json({ error: 'Compilation job not found' });
     }
+
+    if (documentId && job.documentId !== documentId) {
+      return res.status(403).json({ error: 'Compilation job does not belong to requested document' });
+    }
     
     const project = await db.collection('projects').findOne({
       _id: new ObjectId(job.projectId),
@@ -324,10 +380,10 @@ async function downloadPdf(req, res) {
       return res.status(404).json({ error: 'No PDF available for download' });
     }
     
-    const pdfPath = path.join(COMPILATION_DIR, job.pdfPath);
+    const pdfPath = resolveInsideDirectory(COMPILATION_DIR, job.pdfPath);
     
     if (!fs.existsSync(pdfPath)) {
-      const altPdfPath = path.join(COMPILATION_DIR, `${job._id}.pdf`);
+      const altPdfPath = resolveInsideDirectory(COMPILATION_DIR, `${job._id}.pdf`);
       if (fs.existsSync(altPdfPath)) {
         return res.download(altPdfPath, 'document.pdf');
       }
@@ -350,9 +406,13 @@ async function downloadPdf(req, res) {
 
 async function getLatestCompilationStatus(req, res) {
   try {
-    const userId = req.kauth?.grant?.access_token?.content?.sub || req.user?.id;
+    const userId = getUserIdFromRequest(req);
     const documentId = req.params.documentId;
     const db = client.db;
+
+    if (!ObjectId.isValid(documentId)) {
+      return res.status(400).json({ error: 'Invalid document ID' });
+    }
     
     const document = await db.collection('documents').findOne({
       _id: new ObjectId(documentId),

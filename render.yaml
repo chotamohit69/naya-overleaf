@@ -1,0 +1,30 @@
+# Render Blueprint for the hosted preview.
+#
+# The preview runs the app with an in-memory MongoDB and the local LaTeX
+# compiler. It is a demo deployment, not the production topology. Production
+# uses docker-compose.yml with external MongoDB, RabbitMQ, Redis, and the Docker
+# compilation worker.
+
+services:
+  - type: web
+    name: naya-overleaf
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/health/live
+    envVars:
+      - key: NODE_ENV
+        value: development
+      - key: PREVIEW_MODE
+        value: "true"
+      - key: SKIP_KEYCLOAK
+        value: "true"
+      - key: AI_ENABLED
+        value: "false"
+      - key: COMPILATION_DIR
+        value: /app/compilation
+      - key: SESSION_SECRET
+        generateValue: true

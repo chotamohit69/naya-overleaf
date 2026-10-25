@@ -57,10 +57,13 @@ RUN tlmgr install \
     biblatex \
     biber \
     csquotes \
-    microtype
+    microtype \
+    beamer
 
-# Create compilation directory
-RUN mkdir -p /var/texlive/compilation
+# Create compilation directories. /work is world-writable so the non-root
+# compiler user can accept files copied in by the worker.
+RUN mkdir -p /var/texlive/compilation /work && \
+    chmod 0777 /work
 WORKDIR /var/texlive/compilation
 
 # Add compilation script

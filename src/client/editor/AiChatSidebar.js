@@ -14,7 +14,8 @@ class AiChatSidebar {
     this.isOpen = false;
     this.isLoading = false;
     
-    this.AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+    const clientEnv = typeof process !== 'undefined' ? process.env || {} : {};
+    this.AI_SERVICE_URL = clientEnv.AI_SERVICE_URL || '/api/ai';
     
     this.init();
   }
@@ -114,11 +115,11 @@ class AiChatSidebar {
         ? this.getDocumentContent()
         : this.documentContent;
       
-      const response = await fetch(`${this.AI_SERVICE_URL}/ai/chat`, {
+      const response = await fetch(`${this.AI_SERVICE_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
-          user_id: this.userId,
           message,
           document_content: currentDocumentContent,
           cursor_line: cursorLine
@@ -181,27 +182,39 @@ class AiChatSidebar {
     }
   }
 
+  getEditorView() {
+    return this.editor?.view || this.editor || null;
+  }
+
   getCursorLine() {
-    if (this.editor && this.editor.state) {
-      const head = this.editor.state.selection.main.head;
-      return this.editor.state.doc.lineAt(head).number;
+    const view = this.getEditorView();
+
+    if (view && view.state) {
+      const head = view.state.selection.main.head;
+      return view.state.doc.lineAt(head).number;
     }
     return 1;
   }
 
   insertAtLine(lineNumber, latex) {
-    if (!this.editor) return;
-    
-    const lines = this.documentContent.split('\n');
-    const insertIndex = Math.min(lineNumber - 1, lines.length);
+    const view = this.getEditorView();
+
+    if (!view) return;
+
+    const currentContent = this.getDocumentContent
+      ? this.getDocumentContent()
+      : view.state.doc.toString();
+    const lines = currentContent.split('\n');
+    const insertIndex = Math.max(0, Math.min(lineNumber - 1, lines.length));
     
     lines.splice(insertIndex, 0, latex);
     const newContent = lines.join('\n');
+    this.documentContent = newContent;
     
-    this.editor.dispatch({
+    view.dispatch({
       changes: {
         from: 0,
-        to: this.editor.state.doc.length,
+        to: view.state.doc.length,
         insert: newContent
       }
     });

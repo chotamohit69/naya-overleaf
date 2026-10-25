@@ -2,31 +2,42 @@
  * Client Entry Point for Naya Overleaf
  */
 
+import './styles/tokens.css';
+import './styles/themes.css';
 import './styles/main.css';
-import LatexEditor from './editor/LatexEditor';
-import PdfPreview from './pdf/PdfPreview';
+import { dispatchToastNotification } from './react/overlays/notificationBridge';
+import { mountReactIslands } from './react/bootstrap/mountReactIslands';
 
-window.AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
-window.AI_ENABLED = process.env.AI_ENABLED !== 'false';
+const clientEnv = typeof process !== 'undefined' ? process.env || {} : {};
+
+window.AI_SERVICE_URL = clientEnv.AI_SERVICE_URL || '/api/ai';
+window.AI_ENABLED = clientEnv.AI_ENABLED !== 'false';
 
 let editor = null;
 let pdfPreview = null;
 let aiChatSidebar = null;
+let LatexEditorClass = null;
+let PdfPreviewClass = null;
 let currentDocumentId = null;
 let currentProjectId = null;
 let currentProject = null;
+let openingProjectId = null;
+let projectsCache = [];
+let pendingDocumentProjectId = null;
 let socket = null;
 
-const DEFAULT_LATEX_TEMPLATE = `\\documentclass[12pt]{article}
-
-\\usepackage[utf8]{inputenc}
+const LATEX_PREAMBLE = `\\usepackage[utf8]{inputenc}
 \\usepackage[T1]{fontenc}
 \\usepackage{amsmath,amssymb}
 \\usepackage{graphicx}
 \\usepackage{hyperref}
 \\usepackage{geometry}
 \\geometry{margin=1in}
+`;
 
+const LATEX_TEMPLATES = {
+  article: `\\documentclass[12pt]{article}
+${LATEX_PREAMBLE}
 \\title{Untitled Document}
 \\author{Your Name}
 \\date{\\today}
@@ -40,14 +51,93 @@ const DEFAULT_LATEX_TEMPLATE = `\\documentclass[12pt]{article}
 Start writing your document here.
 
 \\end{document}
-`;
+`,
+  report: `\\documentclass[12pt]{report}
+${LATEX_PREAMBLE}
+\\title{Untitled Report}
+\\author{Your Name}
+\\date{\\today}
 
-document.addEventListener('DOMContentLoaded', () => {
+\\begin{document}
+
+\\maketitle
+\\tableofcontents
+
+\\chapter{Introduction}
+
+Start writing your report here.
+
+\\end{document}
+`,
+  book: `\\documentclass[12pt]{book}
+${LATEX_PREAMBLE}
+\\title{Untitled Book}
+\\author{Your Name}
+\\date{\\today}
+
+\\begin{document}
+
+\\frontmatter
+\\maketitle
+\\tableofcontents
+
+\\mainmatter
+\\chapter{Introduction}
+
+Start writing your book here.
+
+\\end{document}
+`,
+  presentation: `\\documentclass{beamer}
+\\usetheme{default}
+
+\\title{Untitled Presentation}
+\\author{Your Name}
+\\date{\\today}
+
+\\begin{document}
+
+\\begin{frame}
+\\titlepage
+\\end{frame}
+
+\\begin{frame}{Introduction}
+Start writing your presentation here.
+\\end{frame}
+
+\\end{document}
+`
+};
+
+const DEFAULT_LATEX_TEMPLATE = LATEX_TEMPLATES.article;
+
+document.addEventListener('DOMContentLoaded', async () => {
+  mountReactIslands();
+  await loadRuntimeConfig();
   setupUI();
   checkAuth();
   setupModals();
   connectSocket();
 });
+
+async function loadRuntimeConfig() {
+  try {
+    const response = await fetch('/api/config', {
+      headers: { Accept: 'application/json' },
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      return;
+    }
+
+    const config = await response.json();
+    window.AI_ENABLED = config.aiEnabled !== false;
+    window.AI_SERVICE_URL = config.aiServiceUrl || '/api/ai';
+  } catch (error) {
+    console.error('Failed to load runtime configuration:', error.message);
+  }
+}
 
 function setupUI() {
   document.querySelectorAll('.nav-link').forEach(link => {
@@ -74,16 +164,23 @@ function setupUI() {
     });
   }
   
+  const aiKeysLink = document.querySelector('.nav-link[data-target="ai-keys"]');
+  if (aiKeysLink) {
+    aiKeysLink.parentElement.style.display = window.AI_ENABLED ? '' : 'none';
+  }
+
   if (window.AI_ENABLED) {
     initAiComponents();
   }
+
+  updateWorkspaceHeader();
 }
 
 function initAiComponents() {
   import('./editor/AiChatSidebar.js').then(module => {
     const AiChatSidebarClass = module.default || module.AiChatSidebar || window.AiChatSidebar;
     aiChatSidebar = new AiChatSidebarClass({
-      editor: null,
+      editor,
       userId: window.currentUserId || 'dev-user-123',
       getDocumentContent: () => (editor ? editor.getContent() : '')
     });
@@ -109,6 +206,25 @@ function initAiComponents() {
   });
 }
 
+function updateWorkspaceHeader() {
+  const projectNameElement = document.getElementById('workspace-project-name');
+  const documentNameElement = document.getElementById('workspace-document-name');
+  const compileButton = document.getElementById('compile-button');
+
+  if (projectNameElement) {
+    projectNameElement.textContent = currentProject?.name || 'No project open';
+  }
+
+  if (documentNameElement) {
+    const currentDocument = currentProject?.documents?.find(doc => doc._id === currentDocumentId);
+    documentNameElement.textContent = currentDocument?.name || (currentProject ? 'Choose a file' : 'Select a project');
+  }
+
+  if (compileButton) {
+    compileButton.disabled = !currentDocumentId;
+  }
+}
+
 function connectSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = io(`${protocol}//${window.location.host}`, {
@@ -126,10 +242,34 @@ function connectSocket() {
     console.log('Disconnected from server');
   });
   
-  socket.on('compilation-complete', (data) => {
-    if (data.documentId === currentDocumentId && pdfPreview) {
-      pdfPreview.loadPdfFromCompilation(data.jobId);
+  socket.on('connect_error', (error) => {
+    console.error('Realtime connection failed:', error.message);
+  });
+
+  socket.on('realtime-error', (data) => {
+    if (data?.error) {
+      showNotification(data.error, 'error');
     }
+  });
+
+  socket.on('compilation-complete', async (data) => {
+    if (data.documentId !== currentDocumentId) {
+      return;
+    }
+
+    const preview = await ensurePdfPreview();
+    if (!preview) {
+      return;
+    }
+
+    if (data.type === 'failed') {
+      preview.showError(
+        'Compilation failed: ' + (data.error || 'Unknown error')
+      );
+      return;
+    }
+
+    preview.loadPdf(`/api/documents/${data.documentId}/pdf?jobId=${data.jobId}`);
   });
 }
 
@@ -167,6 +307,7 @@ async function loadProjects() {
     
     if (response.ok) {
       const projects = await response.json();
+      projectsCache = projects;
       displayProjects(projects);
     } else {
       console.error('Error loading projects');
@@ -179,23 +320,51 @@ async function loadProjects() {
 function displayProjects(projects) {
   const projectsList = document.getElementById('projects-list');
   if (!projectsList) return;
+
+  projectsCache = projects;
   
   projectsList.innerHTML = '';
   
   if (projects.length === 0) {
-    projectsList.innerHTML = '<div class="empty-state">No projects yet. Create a new project to get started.</div>';
+    projectsList.innerHTML = `
+      <div class="empty-state empty-state-panel">
+        <strong>No projects yet</strong>
+        <span>Create a new project to start editing.</span>
+      </div>
+    `;
     return;
   }
   
   projects.forEach(project => {
-    const projectItem = document.createElement('div');
+    const projectItem = document.createElement('button');
     projectItem.className = 'project-item';
+    projectItem.type = 'button';
+    projectItem.dataset.projectId = project._id;
+    const isActiveProject = currentProjectId === project._id;
+    const isOpeningProject = openingProjectId === project._id;
+
     if (currentProjectId === project._id) {
       projectItem.classList.add('active');
     }
+    if (isOpeningProject) {
+      projectItem.classList.add('is-loading');
+      projectItem.disabled = true;
+    }
+
+    const updatedAt = project.updatedAt ? new Date(project.updatedAt).toLocaleString() : 'Unknown';
+    const fileCount = Array.isArray(project.documents) ? project.documents.length : project.documentCount;
+    const fileCountLabel = Number.isFinite(fileCount) ? `${fileCount} file${fileCount === 1 ? '' : 's'}` : 'Project';
+
+    projectItem.setAttribute('aria-pressed', isActiveProject ? 'true' : 'false');
     projectItem.innerHTML = `
-      <div class="project-name">${escapeHtml(project.name)}</div>
-      <div class="project-updated">Updated: ${new Date(project.updatedAt).toLocaleString()}</div>
+      <span class="project-item-main">
+        <span class="project-name">${escapeHtml(project.name)}</span>
+        <span class="project-meta">
+          <span>${fileCountLabel}</span>
+          <span>Updated ${escapeHtml(updatedAt)}</span>
+        </span>
+      </span>
+      <span class="project-open-label">${isOpeningProject ? 'Opening...' : isActiveProject ? 'Open' : 'Open'}</span>
     `;
     
     projectItem.addEventListener('click', () => {
@@ -206,7 +375,15 @@ function displayProjects(projects) {
   });
 }
 
-async function loadProject(projectId) {
+async function loadProject(projectId, preferredDocumentId = null) {
+  if (openingProjectId === projectId) {
+    return;
+  }
+
+  openingProjectId = projectId;
+  displayProjects(projectsCache);
+  updateWorkspaceHeader();
+
   try {
     const response = await fetch(`/api/projects/${projectId}`, {
       credentials: 'include'
@@ -218,15 +395,18 @@ async function loadProject(projectId) {
       
       displayProjectDocuments(currentProject);
       
-      const mainDocument = currentProject.documents?.find(d => d.name.endsWith('.tex')) || currentProject.documents?.[0];
+      const preferredDocument = preferredDocumentId
+        ? currentProject.documents?.find(d => d._id === preferredDocumentId)
+        : null;
+      const mainDocument = preferredDocument || currentProject.documents?.find(d => d.name.endsWith('.tex')) || currentProject.documents?.[0];
       
       if (mainDocument) {
-        loadDocument(mainDocument._id);
+        await loadDocument(mainDocument._id);
       } else {
         await createDefaultDocument(projectId);
       }
-      
-      displayProjects(await (await fetch('/api/projects', { credentials: 'include' })).json());
+
+      loadProjects();
     } else {
       console.error('Error loading project');
       showNotification('Failed to load project', 'error');
@@ -234,6 +414,10 @@ async function loadProject(projectId) {
   } catch (error) {
     console.error('Error loading project:', error);
     showNotification('Failed to load project', 'error');
+  } finally {
+    openingProjectId = null;
+    updateWorkspaceHeader();
+    displayProjects(projectsCache);
   }
 }
 
@@ -254,28 +438,40 @@ function displayProjectDocuments(project) {
     }
   }
   
+  documentsList.hidden = false;
+  documentsList.style.display = '';
   documentsList.innerHTML = '';
-  
-  if (!project.documents || project.documents.length === 0) {
-    documentsList.innerHTML = '<div class="empty-state">No documents</div>';
-    return;
-  }
   
   const header = document.createElement('div');
   header.className = 'documents-header';
-  header.innerHTML = '<h3>Documents</h3>';
+  header.innerHTML = `
+    <h3>Files</h3>
+    <span>${escapeHtml(project.name)}</span>
+  `;
   documentsList.appendChild(header);
+
+  if (!project.documents || project.documents.length === 0) {
+    const emptyState = document.createElement('div');
+    emptyState.className = 'empty-state empty-state-panel';
+    emptyState.innerHTML = `
+      <strong>No files</strong>
+      <span>Add a .tex file to start editing.</span>
+    `;
+    documentsList.appendChild(emptyState);
+  }
   
-  project.documents.forEach(doc => {
-    const docItem = document.createElement('div');
+  (project.documents || []).forEach(doc => {
+    const docItem = document.createElement('button');
     docItem.className = 'document-item';
+    docItem.type = 'button';
+    docItem.dataset.documentId = doc._id;
     if (currentDocumentId === doc._id) {
       docItem.classList.add('active');
     }
     
-    const icon = doc.name.endsWith('.tex') ? '📄' : 
-                 doc.name.endsWith('.bib') ? '📚' : 
-                 doc.name.endsWith('.cls') ? '⚙️' : '📁';
+    const icon = doc.name.endsWith('.tex') ? 'TEX' :
+                 doc.name.endsWith('.bib') ? 'BIB' :
+                 doc.name.endsWith('.cls') ? 'CLS' : 'FILE';
     
     docItem.innerHTML = `
       <span class="doc-icon">${icon}</span>
@@ -291,11 +487,13 @@ function displayProjectDocuments(project) {
   
   const addDocBtn = document.createElement('button');
   addDocBtn.className = 'btn btn-sm add-document-btn';
-  addDocBtn.textContent = '+ Add File';
+  addDocBtn.type = 'button';
+  addDocBtn.textContent = 'Add File';
   addDocBtn.addEventListener('click', () => {
     showNewDocumentModal(project._id);
   });
   documentsList.appendChild(addDocBtn);
+  updateWorkspaceHeader();
 }
 
 async function createDefaultDocument(projectId) {
@@ -308,34 +506,86 @@ async function createDefaultDocument(projectId) {
       credentials: 'include',
       body: JSON.stringify({
         name: 'main.tex',
-        content: DEFAULT_LATEX_TEMPLATE,
+        content: LATEX_TEMPLATES[currentProject?.template] || DEFAULT_LATEX_TEMPLATE,
         projectId
       })
     });
     
     if (response.ok) {
       const doc = await response.json();
-      loadDocument(doc._id);
+      const documents = currentProject?.documents || [];
+      currentProject = {
+        ...(currentProject || { _id: projectId, name: 'Project' }),
+        documents: [...documents, doc]
+      };
+      currentProjectId = projectId;
+      await loadDocument(doc._id);
+      displayProjectDocuments(currentProject);
+      loadProjects();
     }
   } catch (error) {
     console.error('Error creating default document:', error);
   }
 }
 
+function teardownEditor() {
+  if (aiChatSidebar) {
+    aiChatSidebar.editor = null;
+  }
+
+  if (editor) {
+    editor.destroy();
+    editor = null;
+  }
+}
+
+async function loadLatexEditorClass() {
+  if (!LatexEditorClass) {
+    const module = await import('./editor/LatexEditor');
+    LatexEditorClass = module.default;
+  }
+
+  return LatexEditorClass;
+}
+
+async function ensurePdfPreview() {
+  if (pdfPreview) {
+    return pdfPreview;
+  }
+
+  const pdfContainer = document.getElementById('pdf-preview');
+  if (!pdfContainer) {
+    return null;
+  }
+
+  if (!PdfPreviewClass) {
+    const module = await import('./pdf/PdfPreview');
+    PdfPreviewClass = module.default;
+  }
+
+  pdfPreview = new PdfPreviewClass(pdfContainer, {
+    getEditor: () => editor,
+    getCurrentDocumentId: () => currentDocumentId,
+    onNotify: showNotification,
+    onCompile: compileDocument
+  });
+
+  return pdfPreview;
+}
+
 async function loadDocument(documentId) {
   try {
-    if (editor) {
-      editor.destroy();
-      editor = null;
-    }
+    teardownEditor();
     
     currentDocumentId = documentId;
+    updateWorkspaceHeader();
     
     const editorContainer = document.getElementById('latex-editor');
     if (editorContainer) {
       editorContainer.innerHTML = '';
     }
     
+    const LatexEditor = await loadLatexEditorClass();
     editor = new LatexEditor(editorContainer, documentId, {
       lineNumbers: true,
       autoCloseBrackets: true,
@@ -352,20 +602,12 @@ async function loadDocument(documentId) {
     if (socket) {
       socket.emit('join-document', documentId);
     }
-    
-    const pdfContainer = document.getElementById('pdf-preview');
-    if (pdfContainer && !pdfPreview) {
-      pdfPreview = new PdfPreview(pdfContainer, {
-        getEditor: () => editor,
-        getCurrentDocumentId: () => currentDocumentId,
-        onNotify: showNotification,
-        onCompile: compileDocument
-      });
-    }
-    
+
+    await ensurePdfPreview();
     await loadLatestCompilation(documentId);
     
     displayProjectDocuments(currentProject);
+    updateWorkspaceHeader();
     
   } catch (error) {
     console.error('Error loading document:', error);
@@ -383,6 +625,11 @@ async function loadLatestCompilation(documentId) {
       const job = await response.json();
       if (job.status === 'completed' && pdfPreview) {
         pdfPreview.loadPdf(`/api/documents/${documentId}/pdf`);
+      } else if (job.status === 'failed' && pdfPreview) {
+        const detail = job.logTail || job.stderr || job.stdout || '';
+        pdfPreview.showError(
+          'Compilation failed: ' + (job.error || 'Unknown error') + (detail ? `\n\n${detail}` : '')
+        );
       }
     }
   } catch (error) {
@@ -392,6 +639,8 @@ async function loadLatestCompilation(documentId) {
 
 async function compileDocument(documentId) {
   try {
+    await ensurePdfPreview();
+
     if (pdfPreview) {
       pdfPreview.showLoading();
     }
@@ -446,21 +695,29 @@ function navigateTo(target) {
   
   if (target === 'settings' || target === 'ai-keys') {
     showSettings();
+  } else if (target === 'templates') {
+    showTemplatesPlaceholder();
   } else if (target === 'projects') {
     const editorContainer = document.getElementById('latex-editor');
     const projectsList = document.getElementById('projects-list');
     
     if (editorContainer) {
       editorContainer.style.display = '';
-      editorContainer.innerHTML = '<div class="editor-placeholder"><p>Select a project to start editing</p></div>';
+      if (!currentDocumentId && !editor) {
+        editorContainer.innerHTML = '<div class="editor-placeholder"><p>Select a project to start editing</p></div>';
+      } else if (currentDocumentId && !editor) {
+        loadDocument(currentDocumentId);
+      }
     }
     if (projectsList) {
       projectsList.style.display = '';
     }
     const docsList = document.getElementById('documents-list');
     if (docsList) {
-      docsList.style.display = '';
+      docsList.hidden = !currentProject;
+      docsList.style.display = currentProject ? '' : 'none';
     }
+    updateWorkspaceHeader();
   }
   
   document.querySelectorAll('.nav-link').forEach(link => {
@@ -475,9 +732,14 @@ function showSettings() {
   const editorContainer = document.getElementById('latex-editor');
   const projectsList = document.getElementById('projects-list');
   const docsList = document.getElementById('documents-list');
+
+  teardownEditor();
   
   if (projectsList) projectsList.style.display = 'none';
-  if (docsList) docsList.style.display = 'none';
+  if (docsList) {
+    docsList.hidden = true;
+    docsList.style.display = 'none';
+  }
   
   if (editorContainer) {
     editorContainer.innerHTML = '<div id="settings-panel" class="settings-panel"></div>';
@@ -494,6 +756,29 @@ function showSettings() {
     } else {
       settingsPanel.innerHTML = '<p>AI features are disabled</p>';
     }
+  }
+}
+
+function showTemplatesPlaceholder() {
+  const editorContainer = document.getElementById('latex-editor');
+  const projectsList = document.getElementById('projects-list');
+  const docsList = document.getElementById('documents-list');
+
+  teardownEditor();
+  
+  if (projectsList) projectsList.style.display = 'none';
+  if (docsList) {
+    docsList.hidden = true;
+    docsList.style.display = 'none';
+  }
+  
+  if (editorContainer) {
+    editorContainer.innerHTML = `
+      <div class="settings-panel templates-panel">
+        <h2>Templates</h2>
+        <p>Choose a template when creating a new project. A browsable template gallery is still on the roadmap.</p>
+      </div>
+    `;
   }
 }
 
@@ -522,6 +807,33 @@ function setupModals() {
   if (createProjectBtn) {
     createProjectBtn.addEventListener('click', createProject);
   }
+
+  const cancelDocumentBtn = document.getElementById('cancel-document');
+  if (cancelDocumentBtn) {
+    cancelDocumentBtn.addEventListener('click', () => {
+      const modal = document.getElementById('new-document-modal');
+      if (modal) {
+        modal.style.display = 'none';
+      }
+    });
+  }
+
+  const createDocumentBtn = document.getElementById('create-document');
+  if (createDocumentBtn) {
+    createDocumentBtn.addEventListener('click', () => {
+      const docNameInput = document.getElementById('document-name');
+      const docName = docNameInput ? docNameInput.value.trim() : '';
+      if (!pendingDocumentProjectId) {
+        showNotification('Open a project before adding files', 'error');
+        return;
+      }
+      if (!docName) {
+        showNotification('File name is required', 'error');
+        return;
+      }
+      createDocument(pendingDocumentProjectId, docName);
+    });
+  }
 }
 
 function showNewProjectModal() {
@@ -530,14 +842,24 @@ function showNewProjectModal() {
     modal.style.display = 'flex';
     document.getElementById('project-name').value = '';
     document.getElementById('project-description').value = '';
-    document.getElementById('project-template').value = '';
+    document.getElementById('project-template').value = 'article';
   }
 }
 
 function showNewDocumentModal(projectId) {
-  const docName = prompt('Enter document name (e.g., chapter1.tex):');
-  if (docName) {
-    createDocument(projectId, docName);
+  pendingDocumentProjectId = projectId;
+  const modal = document.getElementById('new-document-modal');
+  const docNameInput = document.getElementById('document-name');
+
+  if (modal && docNameInput) {
+    docNameInput.value = '';
+    modal.style.display = 'flex';
+    docNameInput.focus();
+  } else {
+    const docName = window.prompt('Enter document name (e.g., chapter1.tex):');
+    if (docName) {
+      createDocument(projectId, docName);
+    }
   }
 }
 
@@ -558,7 +880,7 @@ async function createProject() {
         'Content-Type': 'application/json'
       },
       credentials: 'include',
-      body: JSON.stringify({ name, description })
+      body: JSON.stringify({ name, description, template })
     });
     
     if (response.ok) {
@@ -604,7 +926,24 @@ async function createDocument(projectId, name) {
     
     if (response.ok) {
       const doc = await response.json();
-      loadProject(projectId);
+      const modal = document.getElementById('new-document-modal');
+      if (modal) {
+        modal.style.display = 'none';
+      }
+      pendingDocumentProjectId = null;
+
+      const projectWasOpen = currentProject && currentProject._id === projectId;
+      if (projectWasOpen) {
+        const currentDocuments = currentProject.documents || [];
+        currentProject = {
+          ...currentProject,
+          documents: currentDocuments.some(existingDoc => existingDoc._id === doc._id)
+            ? currentDocuments
+            : [...currentDocuments, doc]
+        };
+      }
+
+      await loadProject(projectId, doc._id);
       showNotification('Document created', 'success');
     } else {
       const error = await response.json();
@@ -617,21 +956,27 @@ async function createDocument(projectId, name) {
 }
 
 function showNotification(message, type = 'info') {
-  let notification = document.querySelector('.notification');
-  
-  if (!notification) {
-    notification = document.createElement('div');
-    notification.className = 'notification';
-    document.body.appendChild(notification);
-  }
-  
-  notification.textContent = message;
-  notification.className = `notification notification-${type}`;
-  notification.style.display = 'block';
-  
-  setTimeout(() => {
-    notification.style.display = 'none';
-  }, 3000);
+  dispatchToastNotification(window, {
+    message,
+    type,
+    fallback: (fallbackMessage, fallbackType) => {
+      let notification = document.querySelector('.notification');
+
+      if (!notification) {
+        notification = document.createElement('div');
+        notification.className = 'notification';
+        document.body.appendChild(notification);
+      }
+
+      notification.textContent = fallbackMessage;
+      notification.className = `notification notification-${fallbackType}`;
+      notification.style.display = 'block';
+
+      setTimeout(() => {
+        notification.style.display = 'none';
+      }, 3000);
+    }
+  });
 }
 
 function escapeHtml(text) {

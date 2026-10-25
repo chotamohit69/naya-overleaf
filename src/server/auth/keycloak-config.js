@@ -4,8 +4,16 @@
 
 const Keycloak = require('keycloak-connect');
 const session = require('express-session');
+const { MongoSessionStore, DEFAULT_TTL_MS } = require('./session-store');
 
-const IS_DEV = process.env.NODE_ENV !== 'production' || process.env.SKIP_KEYCLOAK === 'true';
+const nodeEnvironment = process.env.NODE_ENV || 'development';
+const isProductionLike = nodeEnvironment !== 'development' && nodeEnvironment !== 'test';
+
+if (isProductionLike && process.env.SKIP_KEYCLOAK === 'true') {
+  throw new Error('SKIP_KEYCLOAK must not be enabled outside development and test');
+}
+
+const IS_DEV = !isProductionLike || process.env.SKIP_KEYCLOAK === 'true';
 
 const configuredSessionSecret = process.env.SESSION_SECRET;
 
@@ -17,15 +25,27 @@ if (!IS_DEV) {
   if (!normalizedSessionSecret || normalizedSessionSecret === 'naya-overleaf-secret') {
     throw new Error('SESSION_SECRET must be set to a non-empty, non-default value in production');
   }
+
+  if (normalizedSessionSecret.length < 32) {
+    throw new Error('SESSION_SECRET must be at least 32 characters in production');
+  }
 }
 
-const memoryStore = new session.MemoryStore();
+const sessionStore = IS_DEV
+  ? new session.MemoryStore()
+  : new MongoSessionStore({ ttlMs: DEFAULT_TTL_MS });
 
 const sessionMiddleware = session({
   secret: configuredSessionSecret || 'naya-overleaf-secret',
   resave: false,
-  saveUninitialized: true,
-  store: memoryStore
+  saveUninitialized: false,
+  store: sessionStore,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: !IS_DEV,
+    maxAge: DEFAULT_TTL_MS
+  }
 });
 
 let keycloak = null;
@@ -42,7 +62,7 @@ if (!IS_DEV) {
     'bearer-only': false
   };
 
-  keycloak = new Keycloak({ store: memoryStore }, keycloakConfig);
+  keycloak = new Keycloak({ store: sessionStore }, keycloakConfig);
 } else {
   console.log('Running in DEVELOPMENT mode - Keycloak disabled');
   keycloak = {
@@ -54,6 +74,8 @@ if (!IS_DEV) {
 module.exports = {
   keycloak,
   sessionMiddleware,
-  memoryStore,
+  sessionStore,
+  // Backwards-compatible alias for development tooling.
+  memoryStore: sessionStore,
   IS_DEV
 };

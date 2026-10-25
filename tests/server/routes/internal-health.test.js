@@ -81,7 +81,7 @@ describe('internal health routes', () => {
 
     const internalRoutes = require('../../../src/server/routes/internalRoutes');
     const app = express();
-    app.use('/', internalRoutes);
+    app.use('/internal', internalRoutes);
 
     return app;
   };

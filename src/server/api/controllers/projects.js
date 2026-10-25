@@ -4,11 +4,12 @@
 
 const { ObjectId } = require('mongodb');
 const client = require('../../db/connection');
+const { getUserIdFromRequest } = require('../../realtime/auth');
 
 // Get all projects for the current user
 const getAllProjects = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const db = client.db;
     
     const projects = await db.collection('projects')
@@ -32,9 +33,13 @@ const getAllProjects = async (req, res) => {
 // Get a single project by ID with its documents
 const getProject = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const projectId = req.params.id;
     const db = client.db;
+
+    if (!ObjectId.isValid(projectId)) {
+      return res.status(400).json({ error: 'Invalid project ID' });
+    }
     
     const project = await db.collection('projects').findOne({
       _id: new ObjectId(projectId),
@@ -71,17 +76,33 @@ const getProject = async (req, res) => {
 // Create a new project
 const createProject = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
-    const { name, description } = req.body;
+    const userId = getUserIdFromRequest(req);
+    const { name, description, template } = req.body;
     const db = client.db;
+    const allowedTemplates = ['article', 'report', 'book', 'presentation'];
     
-    if (!name) {
+    if (typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Project name is required' });
     }
+
+    if (name.trim().length > 200) {
+      return res.status(400).json({ error: 'Project name must be 200 characters or fewer' });
+    }
+
+    if (description !== undefined && typeof description !== 'string') {
+      return res.status(400).json({ error: 'Project description must be a string' });
+    }
     
+    const selectedTemplate = template || 'article';
+
+    if (!allowedTemplates.includes(selectedTemplate)) {
+      return res.status(400).json({ error: `Template must be one of: ${allowedTemplates.join(', ')}` });
+    }
+
     const newProject = {
-      name,
+      name: name.trim(),
       description: description || '',
+      template: selectedTemplate,
       userId,
       collaborators: [],
       createdAt: new Date(),
@@ -104,11 +125,33 @@ const createProject = async (req, res) => {
 // Update a project
 const updateProject = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const projectId = req.params.id;
     const { name, description, collaborators } = req.body;
     const db = client.db;
+
+    if (!ObjectId.isValid(projectId)) {
+      return res.status(400).json({ error: 'Invalid project ID' });
+    }
+
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+      return res.status(400).json({ error: 'Project name must be a non-empty string' });
+    }
+
+    if (description !== undefined && typeof description !== 'string') {
+      return res.status(400).json({ error: 'Project description must be a string' });
+    }
     
+    if (collaborators !== undefined) {
+      if (!Array.isArray(collaborators) || collaborators.some((collaborator) => typeof collaborator !== 'string')) {
+        return res.status(400).json({ error: 'Collaborators must be an array of user IDs' });
+      }
+
+      if (collaborators.length > 100) {
+        return res.status(400).json({ error: 'A project cannot have more than 100 collaborators' });
+      }
+    }
+
     const project = await db.collection('projects').findOne({
       _id: new ObjectId(projectId),
       userId, // Only the owner can update project details
@@ -123,9 +166,11 @@ const updateProject = async (req, res) => {
       updatedAt: new Date()
     };
     
-    if (name) updateData.name = name;
+    if (name) updateData.name = name.trim();
     if (description !== undefined) updateData.description = description;
-    if (collaborators) updateData.collaborators = collaborators;
+    if (collaborators !== undefined) {
+      updateData.collaborators = [...new Set(collaborators)];
+    }
     
     await db.collection('projects').updateOne(
       { _id: new ObjectId(projectId) },
@@ -146,9 +191,13 @@ const updateProject = async (req, res) => {
 // Delete a project (soft delete)
 const deleteProject = async (req, res) => {
   try {
-    const userId = req.kauth.grant.access_token.content.sub;
+    const userId = getUserIdFromRequest(req);
     const projectId = req.params.id;
     const db = client.db;
+
+    if (!ObjectId.isValid(projectId)) {
+      return res.status(400).json({ error: 'Invalid project ID' });
+    }
     
     const project = await db.collection('projects').findOne({
       _id: new ObjectId(projectId),

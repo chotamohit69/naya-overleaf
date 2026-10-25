@@ -4,3 +4,5 @@ coverage/
 .claude/
 __pycache__/
 *.py[cod]
+compilation/
+video-page.png

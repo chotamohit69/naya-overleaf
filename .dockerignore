@@ -1,0 +1,14 @@
+node_modules
+.git
+.claude
+coverage
+docs
+tests
+ai-service
+compilation
+public/js
+.env
+*.log
+video-page.png
+query
+start

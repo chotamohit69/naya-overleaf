@@ -65,8 +65,55 @@ function recordApiResult({ statusCode, durationMs }) {
   }
 }
 
+function recordWebsocketConnected() {
+  metricsState.websocket.connected += 1;
+}
+
+function recordWebsocketDisconnected() {
+  metricsState.websocket.connected = Math.max(0, metricsState.websocket.connected - 1);
+  metricsState.websocket.disconnectedTotal += 1;
+}
+
+function recordWebsocketError() {
+  metricsState.websocket.errorsTotal += 1;
+}
+
+function setQueueDepth(depth) {
+  const normalizedDepth = Number(depth);
+  metricsState.queue.depth = Number.isFinite(normalizedDepth) && normalizedDepth > 0
+    ? Math.floor(normalizedDepth)
+    : 0;
+}
+
+function recordCompilation({ success, durationMs }) {
+  metricsState.compilation.total += 1;
+
+  if (!success) {
+    metricsState.compilation.failed += 1;
+  }
+
+  if (typeof durationMs === 'number' && durationMs >= 0) {
+    metricsState.compilation.durationMs.count += 1;
+    metricsState.compilation.durationMs.total += durationMs;
+  }
+}
+
+function recordDependencyFailure(dependencyName) {
+  const key = `${dependencyName}Failures`;
+
+  if (Object.prototype.hasOwnProperty.call(metricsState.dependencies, key)) {
+    metricsState.dependencies[key] += 1;
+  }
+}
+
 module.exports = {
   getMetricsSnapshot,
   setReadinessMetrics,
-  recordApiResult
+  recordApiResult,
+  recordWebsocketConnected,
+  recordWebsocketDisconnected,
+  recordWebsocketError,
+  setQueueDepth,
+  recordCompilation,
+  recordDependencyFailure
 };

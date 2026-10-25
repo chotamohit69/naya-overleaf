@@ -3,7 +3,10 @@
  * Provides a mock user for development when Keycloak is not available
  */
 
-const IS_DEV = process.env.NODE_ENV !== 'production' || process.env.SKIP_KEYCLOAK === 'true';
+const nodeEnvironment = process.env.NODE_ENV || 'development';
+const IS_DEV = nodeEnvironment === 'development'
+  || nodeEnvironment === 'test'
+  || process.env.SKIP_KEYCLOAK === 'true';
 
 const DEV_USER = {
   id: 'dev-user-123',

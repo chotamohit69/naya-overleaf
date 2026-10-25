@@ -4,6 +4,7 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const client = require('../db/connection');
 const { decrypt } = require('../utils/KeyEncryption');
@@ -26,24 +27,39 @@ const getReadinessPayload = () => {
 
 const INTERNAL_SECRET = process.env.AI_INTERNAL_SECRET;
 
+function secretsMatch(providedSecret, expectedSecret) {
+  if (typeof providedSecret !== 'string' || typeof expectedSecret !== 'string') {
+    return false;
+  }
+
+  const provided = Buffer.from(providedSecret);
+  const expected = Buffer.from(expectedSecret);
+
+  if (provided.length !== expected.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(provided, expected);
+}
+
 function validateInternalSecret(req, res, next) {
   const providedSecret = req.headers['x-internal-secret'];
-  
+
   if (!INTERNAL_SECRET) {
     console.error('AI_INTERNAL_SECRET not configured');
     return res.status(500).json({ error: 'Internal authentication not configured' });
   }
-  
-  if (!providedSecret || providedSecret !== INTERNAL_SECRET) {
+
+  if (!secretsMatch(providedSecret, INTERNAL_SECRET)) {
     return res.status(403).json({ error: 'Forbidden - Invalid internal secret' });
   }
-  
+
   next();
 }
 
 router.use(validateInternalSecret);
 
-router.get('/internal/user/:userId/api-key', async (req, res) => {
+router.get('/user/:userId/api-key', async (req, res) => {
   try {
     const { userId } = req.params;
     
@@ -90,7 +106,7 @@ router.get('/internal/user/:userId/api-key', async (req, res) => {
   }
 });
 
-router.get('/internal/health', (req, res) => {
+router.get('/health', (req, res) => {
   const readiness = getReadinessPayload();
   const statusCode = readiness.ready ? 200 : 503;
 

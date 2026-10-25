@@ -6,3 +6,4 @@ __pycache__/
 *.py[cod]
 compilation/
 video-page.png
+preview-*.png

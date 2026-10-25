@@ -1,9 +1,11 @@
 /**
  * PDF Preview Component using PDF.js
+ *
+ * Pages are rendered directly to canvases. This avoids depending on the
+ * pdf_viewer component and its stylesheet, which is fragile in bundled builds.
  */
 
 import * as pdfjsLib from 'pdfjs-dist';
-import { EventBus, PDFLinkService, PDFViewer } from 'pdfjs-dist/web/pdf_viewer';
 
 // Set the worker source path
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/js/pdf.worker.bundle.js';
@@ -22,11 +24,11 @@ class PdfPreview {
     }, options);
     
     this.pdfDoc = null;
-    this.pdfViewer = null;
-    this.eventBus = null;
-    this.linkService = null;
     this.currentPage = 1;
     this.totalPages = 0;
+    this.scale = this.options.scale || 1;
+    this.renderGeneration = 0;
+    this.pageElements = [];
     this.isLoading = false;
     this.lastJobId = null;
     this.lastCompileLog = '';
@@ -139,53 +141,119 @@ class PdfPreview {
   }
   
   initPdfViewer() {
-    this.eventBus = new EventBus();
-    this.linkService = new PDFLinkService({
-      eventBus: this.eventBus
-    });
-
-    const viewerOptions = {
-      container: this.viewerContainer,
-      viewer: this.viewerElement,
-      eventBus: this.eventBus,
-      linkService: this.linkService
-    };
-    
-    this.pdfViewer = new PDFViewer(viewerOptions);
-    this.pdfViewer.currentScale = this.options.scale;
-    this.linkService.setViewer(this.pdfViewer);
+    this.pageElements = [];
+    this.pdfViewer = null;
+    this.boundScrollHandler = this.handleScroll.bind(this);
+    this.viewerContainer.addEventListener('scroll', this.boundScrollHandler, { passive: true });
   }
   
   async loadPdf(url) {
     try {
       this.showLoading();
-      
-      // Load the PDF document
-      const loadingTask = pdfjsLib.getDocument(url);
+
+      if (this.pdfDoc) {
+        this.pdfDoc.destroy();
+        this.pdfDoc = null;
+      }
+
+      const loadingTask = pdfjsLib.getDocument({
+        url,
+        withCredentials: true
+      });
       this.pdfDoc = await loadingTask.promise;
-      
-      // Set the document in the viewer
-      this.pdfViewer.setDocument(this.pdfDoc);
-      this.linkService.setDocument(this.pdfDoc);
-      
-      // Update total pages
+
       this.totalPages = this.pdfDoc.numPages;
-      
-      // Go to first page
       this.currentPage = 1;
-      this.pdfViewer.currentPageNumber = this.currentPage;
-      
-      // Update UI
+      await this.renderAllPages();
+
       this.updatePageIndicator();
+      this.updateZoomIndicator();
       this.hideLoading();
       this.hideError();
-      
+
       return true;
     } catch (error) {
       console.error('Error loading PDF:', error);
       this.showError('Failed to load PDF: ' + error.message);
       this.hideLoading();
       return false;
+    }
+  }
+
+  async renderAllPages() {
+    if (!this.pdfDoc) {
+      return;
+    }
+
+    const generation = ++this.renderGeneration;
+    this.viewerElement.replaceChildren();
+    this.pageElements = [];
+
+    for (let pageNumber = 1; pageNumber <= this.pdfDoc.numPages; pageNumber++) {
+      if (generation !== this.renderGeneration) {
+        return;
+      }
+
+      const page = await this.pdfDoc.getPage(pageNumber);
+
+      if (generation !== this.renderGeneration) {
+        return;
+      }
+
+      const viewport = page.getViewport({ scale: this.scale });
+      const pixelRatio = window.devicePixelRatio || 1;
+
+      const pageWrapper = document.createElement('div');
+      pageWrapper.className = 'pdf-page';
+      pageWrapper.dataset.pageNumber = String(pageNumber);
+      pageWrapper.style.width = `${viewport.width}px`;
+      pageWrapper.style.height = `${viewport.height}px`;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width * pixelRatio);
+      canvas.height = Math.floor(viewport.height * pixelRatio);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+
+      pageWrapper.appendChild(canvas);
+      this.viewerElement.appendChild(pageWrapper);
+      this.pageElements.push(pageWrapper);
+
+      const context = canvas.getContext('2d');
+      context.scale(pixelRatio, pixelRatio);
+
+      await page.render({
+        canvasContext: context,
+        viewport
+      }).promise;
+    }
+  }
+
+  handleScroll() {
+    if (!this.pageElements.length) {
+      return;
+    }
+
+    const containerTop = this.viewerContainer.getBoundingClientRect().top;
+    let visiblePage = 1;
+
+    this.pageElements.forEach((pageElement, index) => {
+      const rect = pageElement.getBoundingClientRect();
+      if (rect.top - containerTop <= 80) {
+        visiblePage = index + 1;
+      }
+    });
+
+    if (visiblePage !== this.currentPage) {
+      this.currentPage = visiblePage;
+      this.updatePageIndicator();
+    }
+  }
+
+  scrollToPage(pageNumber) {
+    const pageElement = this.pageElements[pageNumber - 1];
+    if (pageElement) {
+      pageElement.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
   }
   
@@ -251,32 +319,34 @@ class PdfPreview {
     if (!this.pdfDoc || this.currentPage >= this.totalPages) return;
     
     this.currentPage++;
-    this.pdfViewer.currentPageNumber = this.currentPage;
     this.updatePageIndicator();
+    this.scrollToPage(this.currentPage);
   }
   
   prevPage() {
     if (!this.pdfDoc || this.currentPage <= 1) return;
     
     this.currentPage--;
-    this.pdfViewer.currentPageNumber = this.currentPage;
     this.updatePageIndicator();
+    this.scrollToPage(this.currentPage);
   }
   
-  zoomIn() {
-    if (!this.pdfViewer) return;
-    
-    const newScale = this.pdfViewer.currentScale * 1.2;
-    this.pdfViewer.currentScale = newScale;
+  async zoomIn() {
+    if (!this.pdfDoc) return;
+
+    this.scale = Math.min(this.scale * 1.2, 4);
     this.updateZoomIndicator();
+    await this.renderAllPages();
+    this.scrollToPage(this.currentPage);
   }
   
-  zoomOut() {
-    if (!this.pdfViewer) return;
-    
-    const newScale = this.pdfViewer.currentScale / 1.2;
-    this.pdfViewer.currentScale = newScale;
+  async zoomOut() {
+    if (!this.pdfDoc) return;
+
+    this.scale = Math.max(this.scale / 1.2, 0.25);
     this.updateZoomIndicator();
+    await this.renderAllPages();
+    this.scrollToPage(this.currentPage);
   }
   
   updatePageIndicator() {
@@ -286,8 +356,8 @@ class PdfPreview {
   }
   
   updateZoomIndicator() {
-    if (this.zoomIndicator && this.pdfViewer) {
-      const zoomPercent = Math.round(this.pdfViewer.currentScale * 100);
+    if (this.zoomIndicator) {
+      const zoomPercent = Math.round(this.scale * 100);
       this.zoomIndicator.textContent = `${zoomPercent}%`;
     }
   }
@@ -474,10 +544,7 @@ class PdfPreview {
   }
   
   handleResize() {
-    if (this.pdfViewer && this.pdfDoc) {
-      // Adjust viewer size based on container
-      this.pdfViewer.update();
-    }
+    // Width changes only affect layout here; canvases keep their rendered size.
   }
   
   async downloadPdf() {
@@ -514,6 +581,12 @@ class PdfPreview {
     if (this.options.autoResize) {
       window.removeEventListener('resize', this.boundResizeHandler);
     }
+
+    if (this.boundScrollHandler && this.viewerContainer) {
+      this.viewerContainer.removeEventListener('scroll', this.boundScrollHandler);
+    }
+
+    this.renderGeneration += 1;
     
     // Remove DOM elements
     while (this.container.firstChild) {
